@@ -1,0 +1,11 @@
+services:
+  - type: web
+    name: mandato-backend
+    env: python
+    region: oregon
+    plan: free
+    branch: main
+    buildCommand: pip install -r backend/requirements.txt
+    startCommand: gunicorn app:app --bind 0.0.0.0:$PORT --workers 2
+    root: .
+    autoDeploy: true

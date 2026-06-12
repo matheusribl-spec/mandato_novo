@@ -1,12 +1,99 @@
-﻿import os
-
-from flask import Flask, jsonify, request
+import os
+import sqlite3
+from datetime import datetime
+from flask import Flask, jsonify, request, g
 try:
     from flask_cors import CORS
 except Exception:
-    # Fallback if Flask-Cors is not installed; server can still run.
     CORS = lambda app: None
-from datetime import datetime
+
+DB_PATH = os.path.join(os.path.dirname(__file__), 'data.db')
+
+def get_db():
+    db = getattr(g, '_database', None)
+    if db is None:
+        db = g._database = sqlite3.connect(DB_PATH, check_same_thread=False)
+        db.row_factory = sqlite3.Row
+    return db
+
+def close_db(e=None):
+    db = getattr(g, '_database', None)
+    if db is not None:
+        db.close()
+
+def init_db():
+    db = get_db()
+    cur = db.cursor()
+    cur.execute('''
+    CREATE TABLE IF NOT EXISTS portals (
+        id TEXT PRIMARY KEY,
+        name TEXT,
+        url TEXT,
+        category TEXT
+    )
+    ''')
+    cur.execute('''
+    CREATE TABLE IF NOT EXISTS themes (
+        id TEXT PRIMARY KEY,
+        title TEXT,
+        description TEXT
+    )
+    ''')
+    cur.execute('''
+    CREATE TABLE IF NOT EXISTS news (
+        id TEXT PRIMARY KEY,
+        title TEXT,
+        summary TEXT,
+        url TEXT,
+        portal_id TEXT,
+        portal_name TEXT,
+        portal_url TEXT,
+        portal_category TEXT,
+        theme_id TEXT,
+        theme_title TEXT,
+        publicationDate TEXT
+    )
+    ''')
+    db.commit()
+
+def seed_if_empty():
+    db = get_db()
+    cur = db.cursor()
+    cur.execute('SELECT COUNT(1) as c FROM news')
+    row = cur.fetchone()
+    if not row or row['c'] == 0:
+        portals = [
+            ("g1", "G1", "https://g1.globo.com", "Notícias"),
+            ("uol", "UOL", "https://www.uol.com.br", "Notícias"),
+            ("folha", "Folha de S.Paulo", "https://www.folha.uol.com.br", "Notícias"),
+        ]
+        themes = [
+            ("politics", "Política", "Conteúdo sobre agendas legislativas."),
+            ("economy", "Economia", "Notícias sobre finanças públicas."),
+        ]
+        cur.executemany('INSERT OR IGNORE INTO portals(id,name,url,category) VALUES (?,?,?,?)', portals)
+        cur.executemany('INSERT OR IGNORE INTO themes(id,title,description) VALUES (?,?,?)', themes)
+
+        sample_news = [
+            ("news_01", "Senado aprova projeto de lei de transparência fiscal",
+             "O Senado aprovou na madrugada um projeto que amplia a transparência do orçamento público e das emendas parlamentares.",
+             "https://g1.globo.com/politica/noticia/2026/06/06/senado-aprova-projeto-de-lei.ghtml",
+             "g1", "G1", "https://g1.globo.com", "Notícias",
+             "politics", "Política", "2026-06-06T14:30:00Z"),
+            ("news_02", "Economia brasileira registra aceleração moderada em junho",
+             "Indicadores de inflação e emprego mostram recuperação gradual, com impacto nas discussões sobre políticas públicas.",
+             "https://www.uol.com.br/economia/2026/06/06/economia-recuperacao.htm",
+             "uol", "UOL", "https://www.uol.com.br", "Notícias",
+             "economy", "Economia", "2026-06-06T10:15:00Z"),
+        ]
+        cur.executemany('''INSERT OR IGNORE INTO news(id,title,summary,url,portal_id,portal_name,portal_url,portal_category,theme_id,theme_title,publicationDate)
+                           VALUES (?,?,?,?,?,?,?,?,?,?,?)''', sample_news)
+        db.commit()
+
+
+app = Flask(__name__)
+app.teardown_appcontext(close_db)
+init_needed = True
 
 # Optional scraper import
 try:
@@ -14,74 +101,24 @@ try:
 except Exception:
     atualizar_noticias = None
 
-app = Flask(__name__)
-CORS(app)
+try:
+    CORS(app)
+except Exception:
+    pass
 
-# In-memory sample data (used as fallback and for development)
-NEWS = [
-    {
-        "id": "news_01",
-        "title": "Senado aprova projeto de lei de transparência fiscal",
-        "summary": "O Senado aprovou na madrugada um projeto que amplia a transparência do orçamento público e das emendas parlamentares.",
-        "url": "https://g1.globo.com/politica/noticia/2026/06/06/senado-aprova-projeto-de-lei.ghtml",
-        "portal": {"id": "g1", "name": "G1", "url": "https://g1.globo.com", "category": "Notícias"},
-        "theme": {"id": "politics", "title": "Política", "description": "Conteúdo sobre agendas legislativas."},
-        "publicationDate": "2026-06-06T14:30:00Z"
-    },
-    {
-        "id": "news_02",
-        "title": "Economia brasileira registra aceleração moderada em junho",
-        "summary": "Indicadores de inflação e emprego mostram recuperação gradual, com impacto nas discussões sobre políticas públicas.",
-        "url": "https://www.uol.com.br/economia/2026/06/06/economia-recuperacao.htm",
-        "portal": {"id": "uol", "name": "UOL", "url": "https://www.uol.com.br", "category": "Notícias"},
-        "theme": {"id": "economy", "title": "Economia", "description": "Notícias sobre finanças públicas."},
-        "publicationDate": "2026-06-06T10:15:00Z"
-    }
-]
 
-PORTALS = [
-    {"id": "g1", "name": "G1", "url": "https://g1.globo.com", "category": "Notícias"},
-    {"id": "uol", "name": "UOL", "url": "https://www.uol.com.br", "category": "Notícias"},
-    {"id": "folha", "name": "Folha de S.Paulo", "url": "https://www.folha.uol.com.br", "category": "Notícias"},
-    {"id": "poder360", "name": "Poder360", "url": "https://www.poder360.com.br", "category": "Notícias"},
-    {"id": "metropoles", "name": "Metrópoles", "url": "https://www.metropoles.com", "category": "Notícias"}
-]
-
-THEMES = [
-    {"id": "politics", "title": "Política", "description": "Conteúdo sobre agendas legislativas."},
-    {"id": "economy", "title": "Economia", "description": "Notícias sobre finanças públicas."},
-    {"id": "elections", "title": "Eleições", "description": "Cobertura de campanhas."},
-    {"id": "transparency", "title": "Transparência", "description": "Assuntos sobre fiscalização."}
-]
+@app.before_first_request
+def prepare_db():
+    global init_needed
+    if init_needed:
+        init_db()
+        seed_if_empty()
+        init_needed = False
 
 
 @app.route('/api/health', methods=['GET'])
 def health():
     return jsonify({'status': 'ok'})
-
-
-def _filter_news(items, fonte=None, tema=None, q=None, data_inicio=None, data_fim=None):
-    result = items
-    if fonte:
-        result = [n for n in result if n.get('portal', {}).get('name') == fonte or n.get('portal', {}).get('id') == fonte]
-    if tema:
-        result = [n for n in result if n.get('theme', {}).get('id') == tema or n.get('theme', {}).get('title') == tema]
-    if q:
-        qlow = q.lower()
-        result = [n for n in result if qlow in n.get('title', '').lower() or qlow in n.get('summary', '').lower()]
-    if data_inicio:
-        try:
-            di = datetime.fromisoformat(data_inicio)
-            result = [n for n in result if datetime.fromisoformat(n.get('publicationDate').replace('Z', '+00:00')) >= di]
-        except Exception:
-            pass
-    if data_fim:
-        try:
-            df = datetime.fromisoformat(data_fim)
-            result = [n for n in result if datetime.fromisoformat(n.get('publicationDate').replace('Z', '+00:00')) <= df]
-        except Exception:
-            pass
-    return result
 
 
 @app.route('/api/news', methods=['GET'])
@@ -92,25 +129,74 @@ def api_news():
     data_inicio = request.args.get('data_inicio')
     data_fim = request.args.get('data_fim')
 
-    # Use NEWS in-memory list as source; in production this should query the DB
-    noticias_filtradas = _filter_news(NEWS, fonte=fonte, tema=tema, q=q, data_inicio=data_inicio, data_fim=data_fim)
-    return jsonify(noticias_filtradas)
+    try:
+        page = int(request.args.get('page', '1'))
+        per_page = int(request.args.get('per_page', '20'))
+    except Exception:
+        page = 1
+        per_page = 20
+
+    db = get_db()
+    cur = db.cursor()
+    clauses = []
+    params = []
+    if fonte:
+        clauses.append('(portal_id = ? OR portal_name = ?)')
+        params.extend([fonte, fonte])
+    if tema:
+        clauses.append('(theme_id = ? OR theme_title = ?)')
+        params.extend([tema, tema])
+    if q:
+        clauses.append('(title LIKE ? OR summary LIKE ?)')
+        qparam = f'%{q}%'
+        params.extend([qparam, qparam])
+    if data_inicio:
+        clauses.append('publicationDate >= ?')
+        params.append(data_inicio)
+    if data_fim:
+        clauses.append('publicationDate <= ?')
+        params.append(data_fim)
+
+    where = ('WHERE ' + ' AND '.join(clauses)) if clauses else ''
+    offset = (page - 1) * per_page
+    sql = f"SELECT * FROM news {where} ORDER BY publicationDate DESC LIMIT ? OFFSET ?"
+    params.extend([per_page, offset])
+    cur.execute(sql, params)
+    rows = cur.fetchall()
+    result = []
+    for r in rows:
+        result.append({
+            'id': r['id'],
+            'title': r['title'],
+            'summary': r['summary'],
+            'url': r['url'],
+            'portal': {'id': r['portal_id'], 'name': r['portal_name'], 'url': r['portal_url'], 'category': r['portal_category']},
+            'theme': {'id': r['theme_id'], 'title': r['theme_title'], 'description': ''},
+            'publicationDate': r['publicationDate']
+        })
+    return jsonify(result)
 
 
 @app.route('/api/portals', methods=['GET'])
 def api_portals():
-    return jsonify(PORTALS)
+    db = get_db()
+    cur = db.cursor()
+    cur.execute('SELECT * FROM portals')
+    rows = cur.fetchall()
+    return jsonify([dict(r) for r in rows])
 
 
 @app.route('/api/themes', methods=['GET'])
 def api_themes():
-    return jsonify(THEMES)
+    db = get_db()
+    cur = db.cursor()
+    cur.execute('SELECT * FROM themes')
+    rows = cur.fetchall()
+    return jsonify([dict(r) for r in rows])
 
 
 @app.route('/api/refresh', methods=['POST'])
 def api_refresh():
-    # This endpoint should trigger the scraping/updating workflow.
-    # For now, keep a safe default that returns 0 if no updater is wired.
     try:
         novo_total = 0
         updater = None
@@ -123,33 +209,56 @@ def api_refresh():
 
         if updater:
             result = updater()
-            # If updater returns a list of news items, insert them into NEWS
             if isinstance(result, list):
-                # avoid duplicates by URL
+                db = get_db()
+                cur = db.cursor()
                 added_items = 0
                 for item in result:
-                    if any(n.get('url') == item.get('url') for n in NEWS):
+                    url = item.get('url')
+                    if not url:
                         continue
-                    NEWS.insert(0, item)
+                    cur.execute('SELECT 1 FROM news WHERE url = ?', (url,))
+                    if cur.fetchone():
+                        continue
+                    cur.execute('''INSERT OR IGNORE INTO news(id,title,summary,url,portal_id,portal_name,portal_url,portal_category,theme_id,theme_title,publicationDate)
+                                   VALUES (?,?,?,?,?,?,?,?,?,?,?)''', (
+                        item.get('id') or url,
+                        item.get('title') or '',
+                        item.get('summary') or '',
+                        url,
+                        item.get('portal', {}).get('id') or item.get('portal') or '',
+                        item.get('portal', {}).get('name') or '',
+                        item.get('portal', {}).get('url') or '',
+                        item.get('portal', {}).get('category') or '',
+                        item.get('theme', {}).get('id') or item.get('tema') or '',
+                        item.get('theme', {}).get('title') or item.get('tema') or '',
+                        item.get('publicationDate') or item.get('publication_date') or datetime.utcnow().isoformat() + 'Z'
+                    ))
                     added_items += 1
+                db.commit()
                 novo_total = added_items
             elif isinstance(result, int):
                 novo_total = result
 
-        # If no updater was found or nothing was added, create a sample news item to simulate an update
         if novo_total == 0:
+            db = get_db()
+            cur = db.cursor()
             stamp = datetime.utcnow().strftime('%Y%m%d%H%M%S')
-            sample = {
-                'id': f'news_sim_{stamp}',
-                'title': f'Notícia simulada {stamp}',
-                'summary': 'Entrada simulada para testar atualização via API.',
-                'url': 'https://example.com/simulated',
-                'portal': {'id': 'sim', 'name': 'Simulado', 'url': 'https://example.com', 'category': 'Notícias'},
-                'theme': {'id': 'politics', 'title': 'Política', 'description': ''},
-                'publicationDate': datetime.utcnow().isoformat() + 'Z'
-            }
-            NEWS.insert(0, sample)
-            novo_total = 1
+            sample_id = f'news_sim_{stamp}'
+            sample_url = f'https://example.com/simulated/{stamp}'
+            cur.execute('SELECT 1 FROM news WHERE id = ? OR url = ?', (sample_id, sample_url))
+            if not cur.fetchone():
+                cur.execute('''INSERT INTO news(id,title,summary,url,portal_id,portal_name,portal_url,portal_category,theme_id,theme_title,publicationDate)
+                               VALUES (?,?,?,?,?,?,?,?,?,?,?)''', (
+                    sample_id,
+                    f'Notícia simulada {stamp}',
+                    'Entrada simulada para testar atualização via API.',
+                    sample_url,
+                    'sim', 'Simulado', 'https://example.com', 'Notícias',
+                    'politics', 'Política', datetime.utcnow().isoformat() + 'Z'
+                ))
+                db.commit()
+                novo_total = 1
 
         return jsonify({'message': f'{novo_total} novas notícias atualizadas'})
     except Exception as e:

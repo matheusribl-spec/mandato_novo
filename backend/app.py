@@ -107,7 +107,7 @@ except Exception:
     pass
 
 
-@app.before_first_request
+@app.before_request
 def prepare_db():
     global init_needed
     if init_needed:
